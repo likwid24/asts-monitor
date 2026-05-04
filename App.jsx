@@ -1,0 +1,350 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const CATEGORIES = [
+  { id: "all", label: "ALL SIGNALS", icon: "◈" },
+  { id: "news", label: "NEWS", icon: "⬡" },
+  { id: "stock", label: "STOCK / EARNINGS", icon: "▲" },
+  { id: "fcc", label: "FCC DOCKETS", icon: "⊕" },
+  { id: "legal", label: "LEGAL", icon: "⚖" },
+  { id: "launch", label: "LAUNCHES", icon: "🚀" },
+  { id: "satellite", label: "SATELLITES", icon: "◯" },
+];
+
+const CATEGORY_COLORS = {
+  news: "#00d4ff",
+  stock: "#00ff9d",
+  fcc: "#ff9d00",
+  legal: "#ff4d6d",
+  launch: "#bf5af2",
+  satellite: "#5af2ff",
+};
+
+const REFRESH_INTERVAL = 15 * 60;
+
+const SEARCH_QUERIES = [
+  { query: "AST SpaceMobile ASTS news announcement 2025", category: "news" },
+  { query: "AST SpaceMobile ASTS stock earnings SEC filing 2025", category: "stock" },
+  { query: "AST SpaceMobile FCC docket filing spectrum 2025", category: "fcc" },
+  { query: "AST SpaceMobile lawsuit legal court 2025", category: "legal" },
+  { query: "AST SpaceMobile satellite launch BlueBird 2025", category: "launch" },
+  { query: "AST SpaceMobile satellite status orbit update 2025", category: "satellite" },
+];
+
+function timeAgo(date) {
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function formatCountdown(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function AlertCard({ alert, isNew }) {
+  const color = CATEGORY_COLORS[alert.category] || "#00d4ff";
+  return (
+    <div style={{
+      background: isNew ? "rgba(0,212,255,0.05)" : "rgba(10,12,24,0.85)",
+      border: `1px solid ${isNew ? color : "rgba(255,255,255,0.06)"}`,
+      borderLeft: `3px solid ${color}`,
+      borderRadius: "8px",
+      padding: "16px 18px",
+      marginBottom: "10px",
+      position: "relative",
+      transition: "all 0.3s ease",
+      animation: isNew ? "slideIn 0.4s ease" : "none",
+    }}>
+      {isNew && (
+        <div style={{
+          position: "absolute", top: "10px", right: "12px",
+          background: color, color: "#000", fontSize: "9px",
+          fontWeight: "800", padding: "2px 7px", borderRadius: "20px",
+          letterSpacing: "1px", fontFamily: "monospace",
+        }}>NEW</div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+        <span style={{ fontSize: "10px", fontWeight: "700", color, letterSpacing: "2px", fontFamily: "monospace", textTransform: "uppercase" }}>
+          {alert.category?.toUpperCase()}
+        </span>
+        <span style={{ color: "rgba(255,255,255,0.2)", fontSize: "10px" }}>•</span>
+        <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.3)", fontFamily: "monospace" }}>
+          {timeAgo(alert.timestamp)}
+        </span>
+      </div>
+      <div style={{ fontSize: "13px", color: "rgba(255,255,255,0.9)", lineHeight: "1.6", fontFamily: "Georgia, serif" }}>
+        {alert.summary}
+      </div>
+      {alert.source && (
+        <div style={{ marginTop: "8px", fontSize: "10px", color: "rgba(255,255,255,0.25)", fontFamily: "monospace" }}>
+          SRC: {alert.source}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ASTSMonitor() {
+  const [alerts, setAlerts] = useState([]);
+  const [newAlertIds, setNewAlertIds] = useState(new Set());
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const [countdown, setCountdown] = useState(REFRESH_INTERVAL);
+  const [notifPermission, setNotifPermission] = useState("default");
+  const [statusMsg, setStatusMsg] = useState("Initializing ASTS Signal Monitor...");
+  const [scanIndex, setScanIndex] = useState(0);
+  const seenSummaries = useRef(new Set());
+  const countdownRef = useRef(null);
+
+  const requestNotifications = async () => {
+    if ("Notification" in window) {
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+    }
+  };
+
+  const sendBrowserNotif = (alert) => {
+    if (Notification.permission === "granted") {
+      new Notification(`⚡ ASTS ALERT: ${alert.category?.toUpperCase()}`, {
+        body: alert.summary,
+        tag: alert.id,
+      });
+    }
+  };
+
+  const fetchAlertsForQuery = async ({ query, category }) => {
+    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS).
+Search the web for the latest updates. Return ONLY a JSON array (no markdown, no backticks) of alert objects.
+Each object must have:
+- "summary": concise 1-2 sentence description (be specific with dates, numbers, names)
+- "source": publication or source name
+- "category": one of: news, stock, fcc, legal, launch, satellite
+- "date": approximate date as ISO string if known, else null
+Focus ONLY on genuinely new, specific, factual updates from the last 60 days.
+Return [] if nothing significant found. Return only raw JSON array.`,
+        messages: [{ role: "user", content: query }],
+      }),
+    });
+
+    const data = await response.json();
+    let jsonText = "";
+    for (const block of data.content || []) {
+      if (block.type === "text") jsonText += block.text;
+    }
+    jsonText = jsonText.replace(/```json|```/g, "").trim();
+    const startIdx = jsonText.indexOf("[");
+    const endIdx = jsonText.lastIndexOf("]");
+    if (startIdx === -1 || endIdx === -1) return [];
+    const parsed = JSON.parse(jsonText.slice(startIdx, endIdx + 1));
+    return parsed.map((item, i) => ({
+      ...item,
+      category,
+      id: `${category}-${Date.now()}-${i}`,
+      timestamp: item.date ? new Date(item.date) : new Date(),
+    }));
+  };
+
+  const runFullScan = useCallback(async () => {
+    setIsLoading(true);
+    const freshAlerts = [];
+    for (let i = 0; i < SEARCH_QUERIES.length; i++) {
+      const q = SEARCH_QUERIES[i];
+      setScanIndex(i + 1);
+      setStatusMsg(`Scanning ${q.category.toUpperCase()} channel... [${i + 1}/${SEARCH_QUERIES.length}]`);
+      try {
+        const results = await fetchAlertsForQuery(q);
+        for (const alert of results) {
+          if (!seenSummaries.current.has(alert.summary)) {
+            seenSummaries.current.add(alert.summary);
+            freshAlerts.push(alert);
+          }
+        }
+      } catch (e) {
+        console.error("Scan error:", q.category, e);
+      }
+    }
+    if (freshAlerts.length > 0) {
+      const freshIds = new Set(freshAlerts.map((a) => a.id));
+      setAlerts((prev) => [...freshAlerts, ...prev].sort((a, b) => b.timestamp - a.timestamp).slice(0, 100));
+      setNewAlertIds(freshIds);
+      freshAlerts.forEach(sendBrowserNotif);
+      setTimeout(() => setNewAlertIds(new Set()), 30000);
+    }
+    setLastRefresh(new Date());
+    setCountdown(REFRESH_INTERVAL);
+    setIsLoading(false);
+    setStatusMsg(freshAlerts.length > 0
+      ? `✓ ${freshAlerts.length} new signal${freshAlerts.length > 1 ? "s" : ""} detected`
+      : "✓ All channels clear — no new signals");
+    setScanIndex(0);
+  }, []);
+
+  useEffect(() => {
+    if ("Notification" in window) setNotifPermission(Notification.permission);
+    runFullScan();
+  }, []);
+
+  useEffect(() => {
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    countdownRef.current = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) { runFullScan(); return REFRESH_INTERVAL; }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(countdownRef.current);
+  }, [runFullScan]);
+
+  const filtered = alerts.filter((a) => activeCategory === "all" || a.category === activeCategory);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#04050f", color: "#fff", fontFamily: "monospace" }}>
+      <style>{`
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        @keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #1a1f3c; border-radius: 2px; }
+      `}</style>
+
+      {/* Stars */}
+      <div style={{ position: "fixed", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+        {Array.from({ length: 60 }).map((_, i) => (
+          <div key={i} style={{
+            position: "absolute",
+            width: i % 5 === 0 ? "2px" : "1px", height: i % 5 === 0 ? "2px" : "1px",
+            background: "rgba(255,255,255,0.5)", borderRadius: "50%",
+            top: `${(i * 17.3) % 100}%`, left: `${(i * 13.7) % 100}%`,
+            animation: `pulse ${2 + (i % 4)}s ease-in-out infinite`,
+            animationDelay: `${(i % 4) * 0.5}s`,
+          }} />
+        ))}
+      </div>
+
+      {/* Header */}
+      <div style={{
+        borderBottom: "1px solid rgba(0,212,255,0.15)",
+        background: "rgba(4,5,15,0.95)",
+        padding: "18px 24px",
+        position: "sticky", top: 0, zIndex: 100,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <span style={{ fontSize: "18px" }}>◉</span>
+              <span style={{ fontSize: "15px", fontWeight: "800", letterSpacing: "4px", color: "#00d4ff" }}>
+                ASTS SIGNAL MONITOR
+              </span>
+              <span style={{
+                fontSize: "9px", background: "rgba(0,212,255,0.1)",
+                border: "1px solid rgba(0,212,255,0.3)", color: "#00d4ff",
+                padding: "2px 8px", borderRadius: "4px", letterSpacing: "1px",
+              }}>AST SPACEMOBILE</span>
+            </div>
+            <div style={{ marginTop: "4px", fontSize: "10px", color: isLoading ? "#00d4ff" : "rgba(255,255,255,0.3)", letterSpacing: "1px" }}>
+              {statusMsg}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" }}>
+            {notifPermission !== "granted" ? (
+              <button onClick={requestNotifications} style={{
+                background: "rgba(0,212,255,0.08)", border: "1px solid rgba(0,212,255,0.4)",
+                color: "#00d4ff", padding: "7px 14px", borderRadius: "6px",
+                fontSize: "10px", cursor: "pointer", letterSpacing: "1px", fontFamily: "monospace",
+              }}>🔔 ENABLE ALERTS</button>
+            ) : (
+              <span style={{ fontSize: "10px", color: "#00ff9d", letterSpacing: "1px" }}>🔔 ALERTS ACTIVE</span>
+            )}
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: "18px", fontWeight: "800", color: countdown < 60 ? "#ff4d6d" : "rgba(255,255,255,0.5)", letterSpacing: "2px" }}>
+                {formatCountdown(countdown)}
+              </div>
+              <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.2)", letterSpacing: "1px" }}>NEXT SCAN</div>
+            </div>
+            <button onClick={runFullScan} disabled={isLoading} style={{
+              background: isLoading ? "rgba(0,212,255,0.04)" : "rgba(0,212,255,0.12)",
+              border: "1px solid rgba(0,212,255,0.4)", color: "#00d4ff",
+              padding: "10px 18px", borderRadius: "6px", fontSize: "11px",
+              cursor: isLoading ? "not-allowed" : "pointer", letterSpacing: "2px",
+              fontFamily: "monospace", fontWeight: "700", display: "flex", alignItems: "center", gap: "6px",
+            }}>
+              <span style={isLoading ? { display: "inline-block", animation: "spin 1s linear infinite" } : {}}>⟳</span>
+              {isLoading ? "SCANNING" : "SCAN NOW"}
+            </button>
+          </div>
+        </div>
+
+        {/* Category tabs */}
+        <div style={{ display: "flex", gap: "6px", marginTop: "14px", flexWrap: "wrap" }}>
+          {CATEGORIES.map((cat) => {
+            const count = cat.id === "all" ? alerts.length : alerts.filter((a) => a.category === cat.id).length;
+            const isActive = activeCategory === cat.id;
+            const color = CATEGORY_COLORS[cat.id] || "#00d4ff";
+            return (
+              <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{
+                background: isActive ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.02)",
+                border: isActive ? `1px solid ${cat.id === "all" ? "#00d4ff" : color}` : "1px solid rgba(255,255,255,0.07)",
+                color: isActive ? (cat.id === "all" ? "#00d4ff" : color) : "rgba(255,255,255,0.35)",
+                padding: "5px 12px", borderRadius: "4px", fontSize: "9px",
+                cursor: "pointer", letterSpacing: "1.5px", fontFamily: "monospace",
+                fontWeight: "700", display: "flex", alignItems: "center", gap: "5px", transition: "all 0.15s",
+              }}>
+                <span>{cat.icon}</span>{cat.label}
+                <span style={{ background: "rgba(255,255,255,0.08)", padding: "0 5px", borderRadius: "10px", fontSize: "9px" }}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Feed */}
+      <div style={{ padding: "20px 24px", maxWidth: "860px", margin: "0 auto" }}>
+        {isLoading && alerts.length === 0 && (
+          <div style={{ textAlign: "center", padding: "80px 0", color: "rgba(255,255,255,0.2)" }}>
+            <div style={{ fontSize: "48px", animation: "spin 2s linear infinite", display: "inline-block", marginBottom: "20px" }}>◌</div>
+            <div style={{ fontSize: "12px", letterSpacing: "3px", color: "#00d4ff" }}>INITIALIZING SCAN ACROSS ALL CHANNELS</div>
+            <div style={{ fontSize: "10px", marginTop: "8px" }}>News · FCC · SEC · Legal · Launches · Satellites</div>
+          </div>
+        )}
+        {!isLoading && filtered.length === 0 && (
+          <div style={{ textAlign: "center", padding: "80px 0", color: "rgba(255,255,255,0.15)" }}>
+            <div style={{ fontSize: "36px", marginBottom: "16px" }}>◯</div>
+            <div style={{ fontSize: "11px", letterSpacing: "2px" }}>NO SIGNALS DETECTED</div>
+            <div style={{ fontSize: "10px", marginTop: "8px" }}>
+              {lastRefresh ? `Last scan: ${lastRefresh.toLocaleTimeString()}` : "Run a scan to begin monitoring"}
+            </div>
+          </div>
+        )}
+        {filtered.map((alert) => (
+          <AlertCard key={alert.id} alert={alert} isNew={newAlertIds.has(alert.id)} />
+        ))}
+        {lastRefresh && filtered.length > 0 && (
+          <div style={{ textAlign: "center", padding: "20px 0", fontSize: "10px", color: "rgba(255,255,255,0.12)", letterSpacing: "1px" }}>
+            LAST SCAN: {lastRefresh.toLocaleString()} · {alerts.length} TOTAL SIGNALS · NEXT SCAN IN {formatCountdown(countdown)}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
