@@ -23,57 +23,14 @@ const CATEGORY_COLORS = {
   partners: "#ff6b35",
 };
 
-const REFRESH_INTERVAL = 5 * 60;
-
-const SEARCH_QUERIES = [
-  // News
-  { query: "AST SpaceMobile breaking news latest", category: "news" },
-  { query: "ASTS SpaceMobile announcement today", category: "news" },
-  { query: "AST SpaceMobile press release", category: "news" },
-
-  // Stock & Financial
-  { query: "ASTS stock news today", category: "stock" },
-  { query: "AST SpaceMobile SEC filing earnings", category: "stock" },
-  { query: "ASTS analyst rating price target", category: "stock" },
-  { query: "AST SpaceMobile investor capital raise", category: "stock" },
-  { query: "ASTS short interest earnings guidance", category: "stock" },
-
-  // Executives & Board
-  { query: "Abel Avellan AST SpaceMobile", category: "people" },
-  { query: "AST SpaceMobile CEO chairman board directors news", category: "people" },
-  { query: "AST SpaceMobile executives management news", category: "people" },
-
-  // Satellites & Technology
-  { query: "BlueBird satellite AST SpaceMobile latest", category: "satellite" },
-  { query: "AST SpaceMobile satellite orbit status update", category: "satellite" },
-  { query: "AST SpaceMobile direct to cell broadband", category: "satellite" },
-  { query: "AST SpaceMobile LEO satellite constellation", category: "satellite" },
-  { query: "space based cellular technology AST", category: "satellite" },
-
-  // Launches
-  { query: "AST SpaceMobile BlueBird satellite launch", category: "launch" },
-  { query: "AST SpaceMobile rocket launch schedule", category: "launch" },
-  { query: "direct to device satellite launch latest", category: "launch" },
-
-  // FCC & Regulatory
-  { query: "AST SpaceMobile FCC docket spectrum license", category: "fcc" },
-  { query: "AST SpaceMobile regulatory approval filing", category: "fcc" },
-  { query: "AST SpaceMobile ITU spectrum coordination", category: "fcc" },
-
-  // Legal
-  { query: "AST SpaceMobile lawsuit court legal", category: "legal" },
-  { query: "ASTS litigation patent dispute", category: "legal" },
-
-  // Partners & Deals
-  { query: "AST SpaceMobile AT&T Verizon partnership deal", category: "partners" },
-  { query: "AST SpaceMobile Vodafone Rakuten agreement", category: "partners" },
-  { query: "AST SpaceMobile TELUS Bell Canada carrier", category: "partners" },
-  { query: "AST SpaceMobile government contract deal", category: "partners" },
-  { query: "AST SpaceMobile carrier partnership latest", category: "partners" },
-];
+// The frontend never calls Anthropic itself — a Vercel cron writes to
+// KV every 30 minutes, /api/alerts reads from KV, the dashboard polls
+// /api/alerts every 60 seconds. Fixed cost regardless of audience size.
+const POLL_INTERVAL = 60;
 
 function timeAgo(date) {
   const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 0) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
@@ -134,12 +91,13 @@ export default function ASTSMonitor() {
   const [newAlertIds, setNewAlertIds] = useState(new Set());
   const [activeCategory, setActiveCategory] = useState("all");
   const [isLoading, setIsLoading] = useState(false);
-  const [lastRefresh, setLastRefresh] = useState(null);
-  const [countdown, setCountdown] = useState(REFRESH_INTERVAL);
+  const [lastRun, setLastRun] = useState(null); // server-side cron timestamp
+  const [lastFetch, setLastFetch] = useState(null); // client-side poll timestamp
+  const [countdown, setCountdown] = useState(POLL_INTERVAL);
   const [notifPermission, setNotifPermission] = useState("default");
-  const [statusMsg, setStatusMsg] = useState("Initializing ASTS Signal Monitor...");
-  const [scanIndex, setScanIndex] = useState(0);
-  const seenSummaries = useRef(new Set());
+  const [statusMsg, setStatusMsg] = useState("Connecting to signal cache...");
+  const [stale, setStale] = useState(false);
+  const seenIds = useRef(new Set());
   const countdownRef = useRef(null);
 
   const requestNotifications = async () => {
@@ -158,88 +116,88 @@ export default function ASTSMonitor() {
     }
   };
 
-  const fetchAlertsForQuery = async ({ query, category }) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+  const pollAlerts = useCallback(async (isFirstLoad = false) => {
+    setIsLoading(true);
     try {
-      const response = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, category }),
-        signal: controller.signal,
+      const response = await fetch("/api/alerts", {
+        headers: { Accept: "application/json" },
       });
-      clearTimeout(timeout);
       const body = await response.json();
       if (!response.ok || body?.error) {
-        // /api/scan now returns 5xx + {error,type} on auth/upstream
-        // failures. Surface in the console so "0 alerts" doesn't hide
-        // a misconfigured env var or expired key again.
-        console.error(
-          "Fetch error:",
-          category,
-          response.status,
-          body?.error || body
-        );
-        return [];
+        console.error("Poll error:", response.status, body?.error || body);
+        setStatusMsg(`✗ ${body?.error || "Cache read failed"} (${response.status})`);
+        setIsLoading(false);
+        setLastFetch(new Date());
+        setCountdown(POLL_INTERVAL);
+        return;
       }
-      return Array.isArray(body) ? body : [];
-    } catch (e) {
-      clearTimeout(timeout);
-      console.error("Fetch error:", category, e.message);
-      return [];
-    }
-  };
 
-  const runFullScan = useCallback(async () => {
-    setIsLoading(true);
-    const freshAlerts = [];
-    for (let i = 0; i < SEARCH_QUERIES.length; i++) {
-      const q = SEARCH_QUERIES[i];
-      setScanIndex(i + 1);
-      setStatusMsg(`Scanning ${q.category.toUpperCase()} — ${q.query}`);
-      try {
-        const results = await fetchAlertsForQuery(q);
-        for (const alert of results) {
-          if (!seenSummaries.current.has(alert.summary)) {
-            seenSummaries.current.add(alert.summary);
-            freshAlerts.push(alert);
-          }
+      const cachedAlerts = Array.isArray(body.alerts) ? body.alerts : [];
+      // Coerce timestamp strings → Date for the AlertCard's timeAgo helper.
+      const hydrated = cachedAlerts.map((a) => ({
+        ...a,
+        timestamp: a.timestamp ? new Date(a.timestamp) : new Date(),
+      }));
+
+      // Identify newly-arrived alerts since last poll. Skip on the very
+      // first load — we don't want every cached row badged "NEW".
+      const incomingIds = new Set(hydrated.map((a) => a.id));
+      const freshlyNewIds = isFirstLoad
+        ? new Set()
+        : new Set(hydrated.filter((a) => !seenIds.current.has(a.id)).map((a) => a.id));
+      seenIds.current = incomingIds;
+
+      setAlerts(hydrated);
+      if (freshlyNewIds.size > 0) {
+        setNewAlertIds(freshlyNewIds);
+        // Browser notification for each genuinely new row.
+        for (const a of hydrated) {
+          if (freshlyNewIds.has(a.id)) sendBrowserNotif(a);
         }
-      } catch (e) {
-        console.error("Scan error:", q.category, e);
+        setTimeout(() => setNewAlertIds(new Set()), 30000);
       }
+
+      setLastRun(body.lastRun ? new Date(body.lastRun) : null);
+      setLastFetch(new Date());
+      setStale(Boolean(body.stale));
+
+      if (body.empty) {
+        setStatusMsg("⌛ Cache empty — waiting for first cron run");
+      } else if (body.stale) {
+        setStatusMsg("⚠ Cache is stale — last update >75 minutes ago");
+      } else {
+        const newCount = freshlyNewIds.size;
+        setStatusMsg(
+          newCount > 0
+            ? `✓ ${newCount} new signal${newCount > 1 ? "s" : ""} since last refresh`
+            : `✓ ${hydrated.length} signal${hydrated.length === 1 ? "" : "s"} cached`
+        );
+      }
+    } catch (e) {
+      console.error("Poll failed:", e.message);
+      setStatusMsg(`✗ Network error — ${e.message}`);
+      setLastFetch(new Date());
+    } finally {
+      setIsLoading(false);
+      setCountdown(POLL_INTERVAL);
     }
-    if (freshAlerts.length > 0) {
-      const freshIds = new Set(freshAlerts.map((a) => a.id));
-      setAlerts((prev) => [...freshAlerts, ...prev].sort((a, b) => b.timestamp - a.timestamp).slice(0, 200));
-      setNewAlertIds(freshIds);
-      freshAlerts.forEach(sendBrowserNotif);
-      setTimeout(() => setNewAlertIds(new Set()), 30000);
-    }
-    setLastRefresh(new Date());
-    setCountdown(REFRESH_INTERVAL);
-    setIsLoading(false);
-    setStatusMsg(freshAlerts.length > 0
-      ? `✓ ${freshAlerts.length} new signal${freshAlerts.length > 1 ? "s" : ""} detected`
-      : "✓ All channels clear — no new signals");
-    setScanIndex(0);
   }, []);
 
   useEffect(() => {
     if ("Notification" in window) setNotifPermission(Notification.permission);
-    runFullScan();
-  }, []);
+    pollAlerts(true);
+  }, [pollAlerts]);
 
   useEffect(() => {
     if (countdownRef.current) clearInterval(countdownRef.current);
     countdownRef.current = setInterval(() => {
       setCountdown((prev) => {
-        if (prev <= 1) { runFullScan(); return REFRESH_INTERVAL; }
+        if (prev <= 1) { pollAlerts(false); return POLL_INTERVAL; }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(countdownRef.current);
-  }, [runFullScan]);
+  }, [pollAlerts]);
 
   const filtered = alerts.filter((a) => activeCategory === "all" || a.category === activeCategory);
 
@@ -285,9 +243,21 @@ export default function ASTSMonitor() {
                 border: "1px solid rgba(0,212,255,0.3)", color: "#00d4ff",
                 padding: "2px 8px", borderRadius: "4px", letterSpacing: "1px",
               }}>AST SPACEMOBILE</span>
+              {stale && (
+                <span style={{
+                  fontSize: "9px", background: "rgba(255,77,109,0.1)",
+                  border: "1px solid rgba(255,77,109,0.5)", color: "#ff4d6d",
+                  padding: "2px 8px", borderRadius: "4px", letterSpacing: "1px",
+                }}>CACHE STALE</span>
+              )}
             </div>
-            <div style={{ marginTop: "4px", fontSize: "10px", color: isLoading ? "#00d4ff" : "rgba(255,255,255,0.3)", letterSpacing: "1px", maxWidth: "600px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {isLoading ? `[${scanIndex}/${SEARCH_QUERIES.length}] ${statusMsg}` : statusMsg}
+            <div style={{ marginTop: "4px", fontSize: "10px", color: isLoading ? "#00d4ff" : "rgba(255,255,255,0.3)", letterSpacing: "1px", maxWidth: "640px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {statusMsg}
+              {lastRun && (
+                <span style={{ marginLeft: "12px", color: "rgba(255,255,255,0.25)" }}>
+                  · cache built {timeAgo(lastRun)}
+                </span>
+              )}
             </div>
           </div>
 
@@ -302,12 +272,12 @@ export default function ASTSMonitor() {
               <span style={{ fontSize: "10px", color: "#00ff9d", letterSpacing: "1px" }}>🔔 ALERTS ACTIVE</span>
             )}
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: "18px", fontWeight: "800", color: countdown < 60 ? "#ff4d6d" : "rgba(255,255,255,0.5)", letterSpacing: "2px" }}>
+              <div style={{ fontSize: "18px", fontWeight: "800", color: countdown < 10 ? "#ff4d6d" : "rgba(255,255,255,0.5)", letterSpacing: "2px" }}>
                 {formatCountdown(countdown)}
               </div>
-              <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.2)", letterSpacing: "1px" }}>NEXT SCAN</div>
+              <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.2)", letterSpacing: "1px" }}>NEXT POLL</div>
             </div>
-            <button onClick={runFullScan} disabled={isLoading} style={{
+            <button onClick={() => pollAlerts(false)} disabled={isLoading} style={{
               background: isLoading ? "rgba(0,212,255,0.04)" : "rgba(0,212,255,0.12)",
               border: "1px solid rgba(0,212,255,0.4)", color: "#00d4ff",
               padding: "10px 18px", borderRadius: "6px", fontSize: "11px",
@@ -315,7 +285,7 @@ export default function ASTSMonitor() {
               fontFamily: "monospace", fontWeight: "700", display: "flex", alignItems: "center", gap: "6px",
             }}>
               <span style={isLoading ? { display: "inline-block", animation: "spin 1s linear infinite" } : {}}>⟳</span>
-              {isLoading ? "SCANNING" : "SCAN NOW"}
+              {isLoading ? "REFRESHING" : "REFRESH"}
             </button>
           </div>
         </div>
@@ -348,8 +318,8 @@ export default function ASTSMonitor() {
         {isLoading && alerts.length === 0 && (
           <div style={{ textAlign: "center", padding: "80px 0", color: "rgba(255,255,255,0.2)" }}>
             <div style={{ fontSize: "48px", animation: "spin 2s linear infinite", display: "inline-block", marginBottom: "20px" }}>◌</div>
-            <div style={{ fontSize: "12px", letterSpacing: "3px", color: "#00d4ff" }}>SCANNING ALL CHANNELS</div>
-            <div style={{ fontSize: "10px", marginTop: "8px" }}>News · FCC · SEC · Legal · Launches · Satellites · People · Partners</div>
+            <div style={{ fontSize: "12px", letterSpacing: "3px", color: "#00d4ff" }}>READING SIGNAL CACHE</div>
+            <div style={{ fontSize: "10px", marginTop: "8px" }}>Updated server-side every 30 minutes</div>
           </div>
         )}
         {!isLoading && filtered.length === 0 && (
@@ -357,16 +327,16 @@ export default function ASTSMonitor() {
             <div style={{ fontSize: "36px", marginBottom: "16px" }}>◯</div>
             <div style={{ fontSize: "11px", letterSpacing: "2px" }}>NO SIGNALS DETECTED</div>
             <div style={{ fontSize: "10px", marginTop: "8px" }}>
-              {lastRefresh ? `Last scan: ${lastRefresh.toLocaleTimeString()}` : "Run a scan to begin monitoring"}
+              {lastFetch ? `Last poll: ${lastFetch.toLocaleTimeString()}` : "Connecting..."}
             </div>
           </div>
         )}
         {filtered.map((alert) => (
           <AlertCard key={alert.id} alert={alert} isNew={newAlertIds.has(alert.id)} />
         ))}
-        {lastRefresh && filtered.length > 0 && (
+        {lastRun && filtered.length > 0 && (
           <div style={{ textAlign: "center", padding: "20px 0", fontSize: "10px", color: "rgba(255,255,255,0.12)", letterSpacing: "1px" }}>
-            LAST SCAN: {lastRefresh.toLocaleString()} · {alerts.length} TOTAL SIGNALS · NEXT SCAN IN {formatCountdown(countdown)}
+            CACHE BUILT {lastRun.toLocaleString()} · {alerts.length} TOTAL SIGNALS · NEXT POLL IN {formatCountdown(countdown)}
           </div>
         )}
       </div>
