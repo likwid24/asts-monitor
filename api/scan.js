@@ -1,6 +1,14 @@
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
+  // Fail loudly on a missing API key — silent [] returns hid the
+  // earlier env-var rename bug for 30+ minutes.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({
+      error: 'ANTHROPIC_API_KEY not set on server. Check Vercel env vars (must be ANTHROPIC_API_KEY, not VITE_ANTHROPIC_API_KEY, and Production scope enabled).',
+    });
+  }
+
   const { query, category } = req.body;
 
   try {
@@ -21,6 +29,18 @@ export default async function handler(req, res) {
     });
 
     const data = await response.json();
+
+    // Anthropic returns HTTP 200 with `{type:"error", error:{...}}` on
+    // auth/model/etc. failures. Surface that to the caller instead of
+    // pretending we just found nothing.
+    if (data.error) {
+      console.error('Anthropic API error:', data.error);
+      return res.status(502).json({
+        error: data.error.message,
+        type: data.error.type,
+      });
+    }
+
     let jsonText = '';
     for (const block of data.content || []) {
       if (block.type === 'text') jsonText += block.text;
@@ -38,6 +58,6 @@ export default async function handler(req, res) {
     })));
   } catch (e) {
     console.error('Scan error:', e);
-    return res.json([]);
+    return res.status(500).json({ error: e.message });
   }
 }

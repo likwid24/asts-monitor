@@ -169,7 +169,20 @@ export default function ASTSMonitor() {
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      return await response.json();
+      const body = await response.json();
+      if (!response.ok || body?.error) {
+        // /api/scan now returns 5xx + {error,type} on auth/upstream
+        // failures. Surface in the console so "0 alerts" doesn't hide
+        // a misconfigured env var or expired key again.
+        console.error(
+          "Fetch error:",
+          category,
+          response.status,
+          body?.error || body
+        );
+        return [];
+      }
+      return Array.isArray(body) ? body : [];
     } catch (e) {
       clearTimeout(timeout);
       console.error("Fetch error:", category, e.message);
