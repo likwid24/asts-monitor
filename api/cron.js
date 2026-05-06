@@ -3,25 +3,28 @@
  *
  * Hits Anthropic 6 times with consolidated topic queries, lets the
  * model classify each result into one of 8 categories, dedupes by
- * summary, and stores the merged feed in Vercel KV. Every visitor
- * to the site reads from KV via /api/alerts, so the API quota is
+ * summary, and writes the merged feed to Vercel Blob storage as a
+ * single JSON object at pathname `asts-alerts.json`. Every visitor
+ * to the site reads from Blob via /api/alerts, so the API quota is
  * fixed (12 calls/hour) regardless of audience size.
  *
  * Auth: optional. If CRON_SECRET is set (Vercel auto-injects on Pro),
  * we require Bearer-token auth. On Hobby it's open by default.
  *
- * KV shape (key = `asts:alerts`):
+ * Blob shape (pathname = `asts-alerts.json`):
  *   { alerts: [...{summary, source, category, date, id, timestamp}],
  *     lastRun: ISO string,
  *     queriesRun: number,
  *     errors: [{query, error}] }
  */
 
-import { kv } from '@vercel/kv';
+import { put } from '@vercel/blob';
+
+const BLOB_PATHNAME = 'asts-alerts.json';
 
 // 6 broad queries spanning the 8 dashboard categories. The model
-// classifies each result into the right category (no hardcoded
-// per-query category — trust the model's per-item label).
+// classifies each result into the right category — no hardcoded
+// per-query category, we trust the model's per-item label.
 const QUERIES = [
   'AST SpaceMobile breaking news announcement press release latest',
   'ASTS stock SEC filing earnings analyst rating capital raise',
@@ -92,6 +95,11 @@ export default async function handler(req, res) {
       error: 'ANTHROPIC_API_KEY not set on server',
     });
   }
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return res.status(500).json({
+      error: 'BLOB_READ_WRITE_TOKEN not set — connect a Vercel Blob store to the project',
+    });
+  }
 
   const allItems = [];
   const errors = [];
@@ -134,7 +142,6 @@ export default async function handler(req, res) {
   const limited = unique.slice(0, 200);
 
   const lastRun = new Date().toISOString();
-  // Stamp ids + numeric timestamps client-side-ready.
   const enriched = limited.map((a, i) => ({
     ...a,
     id: `${a.category}-${Date.parse(lastRun)}-${i}`,
@@ -148,12 +155,23 @@ export default async function handler(req, res) {
     errors,
   };
 
+  let blobUrl;
   try {
-    await kv.set('asts:alerts', payload);
+    // Overwrite the same pathname every run. `addRandomSuffix: false`
+    // is required to keep a stable path; `allowOverwrite: true` lets
+    // subsequent runs replace the prior payload.
+    const blob = await put(BLOB_PATHNAME, JSON.stringify(payload), {
+      access: 'public',
+      contentType: 'application/json',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      cacheControlMaxAge: 30, // edge can cache for 30s; cron runs every 1800s
+    });
+    blobUrl = blob.url;
   } catch (e) {
-    console.error('kv.set failed:', e.message);
+    console.error('blob put failed:', e.message);
     return res.status(500).json({
-      error: 'KV write failed (is the KV store connected?)',
+      error: 'Blob write failed (is BLOB_READ_WRITE_TOKEN set? store connected?)',
       detail: e.message,
       payloadCount: enriched.length,
     });
@@ -165,11 +183,12 @@ export default async function handler(req, res) {
     queriesRun: QUERIES.length,
     errors: errors.length,
     lastRun,
+    blobUrl,
   });
 }
 
-// Vercel function config — bump max duration for the long upstream call
-// (web search + 6 queries can run 30-60s total).
+// Bump max duration for the long upstream call (web search + 6 queries
+// can run 30-60s total).
 export const config = {
   maxDuration: 90,
 };
