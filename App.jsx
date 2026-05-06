@@ -159,48 +159,22 @@ export default function ASTSMonitor() {
   };
 
   const fetchAlertsForQuery = async ({ query, category }) => {
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 4096,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS) and everything related to it — executives, satellites, partners, regulators, financials, and the broader space-based cellular industry.
-Search the web for the latest updates. Reply with NOTHING but a single JSON array of alert objects. No preamble, no markdown, no code fences. First character must be `[`, last must be `]`.
-Each object must have:
-- "summary": concise 1-2 sentence description (be specific with dates, numbers, names)
-- "source": publication or source name
-- "category": one of: news, stock, fcc, legal, launch, satellite, people, partners
-- "date": approximate date as ISO string if known, else null
-Focus on updates from the last 7 days. Be exhaustive — return every relevant result you find.
-Return [] if nothing found. Return only raw JSON array.`,
-        messages: [{ role: "user", content: query }],
-      }),
-    });
-
-    const data = await response.json();
-    let jsonText = "";
-    for (const block of data.content || []) {
-      if (block.type === "text") jsonText += block.text;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, category }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return await response.json();
+    } catch (e) {
+      clearTimeout(timeout);
+      console.error("Fetch error:", category, e.message);
+      return [];
     }
-    jsonText = jsonText.replace(/```json|```/g, "").trim();
-    const startIdx = jsonText.indexOf("[");
-    const endIdx = jsonText.lastIndexOf("]");
-    if (startIdx === -1 || endIdx === -1) return [];
-    const parsed = JSON.parse(jsonText.slice(startIdx, endIdx + 1));
-    return parsed.map((item, i) => ({
-      ...item,
-      category,
-      id: `${category}-${Date.now()}-${i}`,
-      timestamp: item.date ? new Date(item.date) : new Date(),
-    }));
   };
 
   const runFullScan = useCallback(async () => {
