@@ -169,7 +169,7 @@ export default function ASTSMonitor() {
         "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
         max_tokens: 1000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS) and everything related to it — executives, satellites, partners, regulators, financials, and the broader space-based cellular industry.
