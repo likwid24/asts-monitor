@@ -101,18 +101,26 @@ export default async function handler(req, res) {
     });
   }
 
+  // Run the 6 queries in parallel — each Anthropic web-search call
+  // takes 10-30s, so sequential execution blew the 90s function ceiling
+  // (FUNCTION_INVOCATION_TIMEOUT) on the first prod run. With
+  // Promise.allSettled total wall time is max(latency) instead of sum.
+  const results = await Promise.allSettled(
+    QUERIES.map((query) => runOneQuery(query))
+  );
+
   const allItems = [];
   const errors = [];
-
-  for (const query of QUERIES) {
-    try {
-      const items = await runOneQuery(query);
-      for (const item of items) allItems.push(item);
-    } catch (e) {
-      console.error('cron query failed:', query, e.message);
-      errors.push({ query, error: e.message });
+  results.forEach((r, i) => {
+    const query = QUERIES[i];
+    if (r.status === 'fulfilled') {
+      for (const item of r.value) allItems.push(item);
+    } else {
+      const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      console.error('cron query failed:', query, msg);
+      errors.push({ query, error: msg });
     }
-  }
+  });
 
   // Dedupe by summary (model can return overlapping stories across queries).
   const seen = new Set();
@@ -187,8 +195,11 @@ export default async function handler(req, res) {
   });
 }
 
-// Bump max duration for the long upstream call (web search + 6 queries
-// can run 30-60s total).
+// Function timeout. Pro plan ceiling is 300s; we set 180s for headroom
+// on slow web-search responses. The first prod run hit the prior 90s
+// limit (FUNCTION_INVOCATION_TIMEOUT) before parallelization landed —
+// even with parallel queries, individual web-search calls can run 30s+
+// when the model decides to do multiple searches per query.
 export const config = {
-  maxDuration: 90,
+  maxDuration: 180,
 };
