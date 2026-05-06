@@ -170,10 +170,10 @@ export default function ASTSMonitor() {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
-        max_tokens: 1000,
+        max_tokens: 4096,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS) and everything related to it — executives, satellites, partners, regulators, financials, and the broader space-based cellular industry.
-Search the web for the latest updates. Return ONLY a JSON array (no markdown, no backticks) of alert objects.
+Search the web for the latest updates. Reply with NOTHING but a single JSON array. No preamble, no markdown, no code fences. First character must be [, last must be ]. a JSON array (no markdown, no backticks) of alert objects.
 Each object must have:
 - "summary": concise 1-2 sentence description (be specific with dates, numbers, names)
 - "source": publication or source name
