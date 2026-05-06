@@ -8,6 +8,8 @@ const CATEGORIES = [
   { id: "legal", label: "LEGAL", icon: "⚖" },
   { id: "launch", label: "LAUNCHES", icon: "🚀" },
   { id: "satellite", label: "SATELLITES", icon: "◯" },
+  { id: "people", label: "PEOPLE", icon: "◎" },
+  { id: "partners", label: "PARTNERS", icon: "⬟" },
 ];
 
 const CATEGORY_COLORS = {
@@ -17,17 +19,57 @@ const CATEGORY_COLORS = {
   legal: "#ff4d6d",
   launch: "#bf5af2",
   satellite: "#5af2ff",
+  people: "#ffd60a",
+  partners: "#ff6b35",
 };
 
-const REFRESH_INTERVAL = 15 * 60;
+const REFRESH_INTERVAL = 5 * 60;
 
 const SEARCH_QUERIES = [
-  { query: "AST SpaceMobile ASTS news announcement 2025", category: "news" },
-  { query: "AST SpaceMobile ASTS stock earnings SEC filing 2025", category: "stock" },
-  { query: "AST SpaceMobile FCC docket filing spectrum 2025", category: "fcc" },
-  { query: "AST SpaceMobile lawsuit legal court 2025", category: "legal" },
-  { query: "AST SpaceMobile satellite launch BlueBird 2025", category: "launch" },
-  { query: "AST SpaceMobile satellite status orbit update 2025", category: "satellite" },
+  // News
+  { query: "AST SpaceMobile breaking news latest", category: "news" },
+  { query: "ASTS SpaceMobile announcement today", category: "news" },
+  { query: "AST SpaceMobile press release", category: "news" },
+
+  // Stock & Financial
+  { query: "ASTS stock news today", category: "stock" },
+  { query: "AST SpaceMobile SEC filing earnings", category: "stock" },
+  { query: "ASTS analyst rating price target", category: "stock" },
+  { query: "AST SpaceMobile investor capital raise", category: "stock" },
+  { query: "ASTS short interest earnings guidance", category: "stock" },
+
+  // Executives & Board
+  { query: "Abel Avellan AST SpaceMobile", category: "people" },
+  { query: "AST SpaceMobile CEO chairman board directors news", category: "people" },
+  { query: "AST SpaceMobile executives management news", category: "people" },
+
+  // Satellites & Technology
+  { query: "BlueBird satellite AST SpaceMobile latest", category: "satellite" },
+  { query: "AST SpaceMobile satellite orbit status update", category: "satellite" },
+  { query: "AST SpaceMobile direct to cell broadband", category: "satellite" },
+  { query: "AST SpaceMobile LEO satellite constellation", category: "satellite" },
+  { query: "space based cellular technology AST", category: "satellite" },
+
+  // Launches
+  { query: "AST SpaceMobile BlueBird satellite launch", category: "launch" },
+  { query: "AST SpaceMobile rocket launch schedule", category: "launch" },
+  { query: "direct to device satellite launch latest", category: "launch" },
+
+  // FCC & Regulatory
+  { query: "AST SpaceMobile FCC docket spectrum license", category: "fcc" },
+  { query: "AST SpaceMobile regulatory approval filing", category: "fcc" },
+  { query: "AST SpaceMobile ITU spectrum coordination", category: "fcc" },
+
+  // Legal
+  { query: "AST SpaceMobile lawsuit court legal", category: "legal" },
+  { query: "ASTS litigation patent dispute", category: "legal" },
+
+  // Partners & Deals
+  { query: "AST SpaceMobile AT&T Verizon partnership deal", category: "partners" },
+  { query: "AST SpaceMobile Vodafone Rakuten agreement", category: "partners" },
+  { query: "AST SpaceMobile TELUS Bell Canada carrier", category: "partners" },
+  { query: "AST SpaceMobile government contract deal", category: "partners" },
+  { query: "AST SpaceMobile carrier partnership latest", category: "partners" },
 ];
 
 function timeAgo(date) {
@@ -130,15 +172,15 @@ export default function ASTSMonitor() {
         model: "claude-sonnet-4-20250514",
         max_tokens: 1000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS).
+        system: `You are an intelligence analyst monitoring AST SpaceMobile (ticker: ASTS) and everything related to it — executives, satellites, partners, regulators, financials, and the broader space-based cellular industry.
 Search the web for the latest updates. Return ONLY a JSON array (no markdown, no backticks) of alert objects.
 Each object must have:
 - "summary": concise 1-2 sentence description (be specific with dates, numbers, names)
 - "source": publication or source name
-- "category": one of: news, stock, fcc, legal, launch, satellite
+- "category": one of: news, stock, fcc, legal, launch, satellite, people, partners
 - "date": approximate date as ISO string if known, else null
-Focus ONLY on genuinely new, specific, factual updates from the last 60 days.
-Return [] if nothing significant found. Return only raw JSON array.`,
+Focus on updates from the last 7 days. Be exhaustive — return every relevant result you find.
+Return [] if nothing found. Return only raw JSON array.`,
         messages: [{ role: "user", content: query }],
       }),
     });
@@ -167,7 +209,7 @@ Return [] if nothing significant found. Return only raw JSON array.`,
     for (let i = 0; i < SEARCH_QUERIES.length; i++) {
       const q = SEARCH_QUERIES[i];
       setScanIndex(i + 1);
-      setStatusMsg(`Scanning ${q.category.toUpperCase()} channel... [${i + 1}/${SEARCH_QUERIES.length}]`);
+      setStatusMsg(`Scanning ${q.category.toUpperCase()} — ${q.query}`);
       try {
         const results = await fetchAlertsForQuery(q);
         for (const alert of results) {
@@ -182,7 +224,7 @@ Return [] if nothing significant found. Return only raw JSON array.`,
     }
     if (freshAlerts.length > 0) {
       const freshIds = new Set(freshAlerts.map((a) => a.id));
-      setAlerts((prev) => [...freshAlerts, ...prev].sort((a, b) => b.timestamp - a.timestamp).slice(0, 100));
+      setAlerts((prev) => [...freshAlerts, ...prev].sort((a, b) => b.timestamp - a.timestamp).slice(0, 200));
       setNewAlertIds(freshIds);
       freshAlerts.forEach(sendBrowserNotif);
       setTimeout(() => setNewAlertIds(new Set()), 30000);
@@ -225,7 +267,6 @@ Return [] if nothing significant found. Return only raw JSON array.`,
         ::-webkit-scrollbar-thumb { background: #1a1f3c; border-radius: 2px; }
       `}</style>
 
-      {/* Stars */}
       <div style={{ position: "fixed", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
         {Array.from({ length: 60 }).map((_, i) => (
           <div key={i} style={{
@@ -239,7 +280,6 @@ Return [] if nothing significant found. Return only raw JSON array.`,
         ))}
       </div>
 
-      {/* Header */}
       <div style={{
         borderBottom: "1px solid rgba(0,212,255,0.15)",
         background: "rgba(4,5,15,0.95)",
@@ -259,8 +299,8 @@ Return [] if nothing significant found. Return only raw JSON array.`,
                 padding: "2px 8px", borderRadius: "4px", letterSpacing: "1px",
               }}>AST SPACEMOBILE</span>
             </div>
-            <div style={{ marginTop: "4px", fontSize: "10px", color: isLoading ? "#00d4ff" : "rgba(255,255,255,0.3)", letterSpacing: "1px" }}>
-              {statusMsg}
+            <div style={{ marginTop: "4px", fontSize: "10px", color: isLoading ? "#00d4ff" : "rgba(255,255,255,0.3)", letterSpacing: "1px", maxWidth: "600px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {isLoading ? `[${scanIndex}/${SEARCH_QUERIES.length}] ${statusMsg}` : statusMsg}
             </div>
           </div>
 
@@ -293,7 +333,6 @@ Return [] if nothing significant found. Return only raw JSON array.`,
           </div>
         </div>
 
-        {/* Category tabs */}
         <div style={{ display: "flex", gap: "6px", marginTop: "14px", flexWrap: "wrap" }}>
           {CATEGORIES.map((cat) => {
             const count = cat.id === "all" ? alerts.length : alerts.filter((a) => a.category === cat.id).length;
@@ -318,13 +357,12 @@ Return [] if nothing significant found. Return only raw JSON array.`,
         </div>
       </div>
 
-      {/* Feed */}
       <div style={{ padding: "20px 24px", maxWidth: "860px", margin: "0 auto" }}>
         {isLoading && alerts.length === 0 && (
           <div style={{ textAlign: "center", padding: "80px 0", color: "rgba(255,255,255,0.2)" }}>
             <div style={{ fontSize: "48px", animation: "spin 2s linear infinite", display: "inline-block", marginBottom: "20px" }}>◌</div>
-            <div style={{ fontSize: "12px", letterSpacing: "3px", color: "#00d4ff" }}>INITIALIZING SCAN ACROSS ALL CHANNELS</div>
-            <div style={{ fontSize: "10px", marginTop: "8px" }}>News · FCC · SEC · Legal · Launches · Satellites</div>
+            <div style={{ fontSize: "12px", letterSpacing: "3px", color: "#00d4ff" }}>SCANNING ALL CHANNELS</div>
+            <div style={{ fontSize: "10px", marginTop: "8px" }}>News · FCC · SEC · Legal · Launches · Satellites · People · Partners</div>
           </div>
         )}
         {!isLoading && filtered.length === 0 && (
