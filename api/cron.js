@@ -169,7 +169,7 @@ export default async function handler(req, res) {
     // is required to keep a stable path; `allowOverwrite: true` lets
     // subsequent runs replace the prior payload.
     const blob = await put(BLOB_PATHNAME, JSON.stringify(payload), {
-      access: 'public',
+      access: 'private',
       contentType: 'application/json',
       addRandomSuffix: false,
       allowOverwrite: true,

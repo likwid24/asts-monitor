@@ -3,9 +3,11 @@
  * whatever the most-recent cron run wrote to Vercel Blob. No upstream
  * Anthropic call ever happens here — fixed cost regardless of traffic.
  *
- * Implementation: `head(pathname)` looks up the blob's metadata + URL
- * (Blob URLs are random-host so we can't hardcode them), then we fetch
- * the JSON body from that URL and forward it.
+ * Implementation: the Blob store is private, so we use the SDK's
+ * `get(pathname, { access: 'private' })` which returns a body stream
+ * the function reads + forwards. No public URL ever touches the
+ * client. Returns null when the blob doesn't exist yet (first deploy
+ * before cron has run).
  *
  * Response shape:
  *   { alerts: [...], lastRun: ISO|null, queriesRun: number,
@@ -15,7 +17,7 @@
  * (cron runs every 30; 1.5x slack for transient cron skips).
  */
 
-import { head, BlobNotFoundError } from '@vercel/blob';
+import { get } from '@vercel/blob';
 
 const BLOB_PATHNAME = 'asts-alerts.json';
 const STALE_AFTER_MS = 75 * 60 * 1000;
@@ -29,45 +31,39 @@ export default async function handler(req, res) {
     });
   }
 
-  let blobMeta;
+  let result;
   try {
-    blobMeta = await head(BLOB_PATHNAME);
+    result = await get(BLOB_PATHNAME, { access: 'private' });
   } catch (e) {
-    // Cron hasn't run yet (fresh deploy / Blob just attached) — return
-    // an empty payload rather than 5xx so the UI shows "waiting" state.
-    if (e instanceof BlobNotFoundError) {
-      return res.json({
-        alerts: [],
-        lastRun: null,
-        queriesRun: 0,
-        errors: [],
-        stale: false,
-        empty: true,
-      });
-    }
-    console.error('blob head failed:', e.message);
+    console.error('blob get failed:', e.message);
     return res.status(500).json({
       error: 'Blob read failed',
       detail: e.message,
     });
   }
 
+  if (!result) {
+    // Cron hasn't run yet (fresh deploy / Blob just attached) — return
+    // an empty payload rather than 5xx so the UI shows "waiting" state.
+    return res.json({
+      alerts: [],
+      lastRun: null,
+      queriesRun: 0,
+      errors: [],
+      stale: false,
+      empty: true,
+    });
+  }
+
   let cached;
   try {
-    const response = await fetch(blobMeta.url, {
-      // Bypass the edge cache so newly-written cron payloads aren't
-      // shadowed by a stale CDN copy. The Blob CDN's own cache is
-      // already short (cacheControlMaxAge: 30 set by the cron writer).
-      cache: 'no-store',
-    });
-    if (!response.ok) {
-      throw new Error(`fetch ${response.status} ${response.statusText}`);
-    }
-    cached = await response.json();
+    // result.stream is a ReadableStream<Uint8Array>; Response wraps it
+    // and gives us a .json() helper for free.
+    cached = await new Response(result.stream).json();
   } catch (e) {
-    console.error('blob body fetch failed:', e.message);
+    console.error('blob body parse failed:', e.message);
     return res.status(500).json({
-      error: 'Blob body fetch failed',
+      error: 'Blob body parse failed',
       detail: e.message,
     });
   }
